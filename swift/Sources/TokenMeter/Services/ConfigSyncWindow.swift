@@ -140,12 +140,23 @@ struct DiffReviewView: View {
     private var previewList: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                if let targets = preview?.targets {
-                    let changed = targets.filter { $0.change != "none" }
-                    if changed.isEmpty {
+                if let preview {
+                    let changed = preview.targets.filter { $0.change != "none" }
+                    let missing = ConfigPreview.missingTargetLayers(
+                        targets: targets,
+                        layers: layers,
+                        result: preview
+                    )
+                    if !missing.isEmpty {
+                        missingTargetLayerBlock(missing)
+                    }
+                    if changed.isEmpty && missing.isEmpty {
                         Text("各目标已与真源一致，无需改动。")
                             .font(.system(size: 12)).foregroundStyle(.secondary)
                             .padding(.top, 40)
+                    } else if changed.isEmpty {
+                        Text("没有可写入的目标。")
+                            .font(.system(size: 12)).foregroundStyle(.secondary)
                     }
                     ForEach(changed) { t in
                         targetBlock(t)
@@ -157,6 +168,20 @@ struct DiffReviewView: View {
         }
     }
 
+    private func missingTargetLayerBlock(_ missing: [ConfigSyncTargetLayer]) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Label("部分目标层未返回预览，已视为未同步", systemImage: "exclamationmark.triangle.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.orange)
+            Text(missing.map { "\($0.target) · \($0.layer.uppercased())" }.joined(separator: "、"))
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            Text("这些层可能不受目标工具支持。为避免部分同步，本次不能确认写入；请调整目标或同步层后重试。")
+                .font(.system(size: 10)).foregroundStyle(.secondary)
+        }
+        .padding(10)
+        .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: Theme.corner))
+    }
+
     private func targetBlock(_ t: PushTarget) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
@@ -166,8 +191,14 @@ struct DiffReviewView: View {
                     .background(Theme.brand.opacity(0.15), in: Capsule())
                 Text(changeLabel(t.change)).font(.system(size: 10)).foregroundStyle(.secondary)
             }
-            Text(t.path).font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+            if let path = t.path, !path.isEmpty {
+                Text(path).font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+            }
+            if let reason = t.skipReason, !reason.isEmpty {
+                Text("未同步：\(reason)").font(.system(size: 10))
+                    .foregroundStyle(.orange)
+            }
             if let s = t.servers {
                 if !s.added.isEmpty {
                     serverDiffLine("新增", s.added, .green)
@@ -240,16 +271,19 @@ struct DiffReviewView: View {
         HStack {
             Button("关闭") { onClose() }
             Spacer()
-            if phase == .preview, let p = preview, p.targets.contains(where: { $0.change != "none" }) {
-                Button {
-                    let n = p.targets.filter { $0.change != "none" }.count
-                    if ConfigSyncWindow.confirmApply(targetCount: n) {
-                        Task { await doApply() }
+            if phase == .preview, let p = preview {
+                let writableTargets = ConfigPreview.writableTargetKeys(in: p)
+                if ConfigPreview.canApply(targets: targets, layers: layers, result: p) {
+                    Button {
+                        let n = writableTargets.count
+                        if ConfigSyncWindow.confirmApply(targetCount: n) {
+                            Task { await doApply() }
+                        }
+                    } label: {
+                        Label("确认写入", systemImage: "square.and.arrow.down.fill")
                     }
-                } label: {
-                    Label("确认写入", systemImage: "square.and.arrow.down.fill")
+                    .buttonStyle(.borderedProminent)
                 }
-                .buttonStyle(.borderedProminent)
             }
         }
         .padding(12)

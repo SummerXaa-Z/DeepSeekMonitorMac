@@ -8,19 +8,20 @@ import Foundation
 
 enum AgentSyncError: LocalizedError {
     case cliNotFound
-    case nonZeroExit(code: Int32, stderr: String)
-    case decodeFailed(String)
+    case nonZeroExit(code: Int32)
+    case decodeFailed
     case cliError(String)   // CLI 返回 ok:false 的业务错误
 
     var errorDescription: String? {
         switch self {
         case .cliNotFound:
             return "未找到 agentsync 命令。请先执行：uv tool install --editable ~/Documents/code-xt/agentsync"
-        case .nonZeroExit(let code, let stderr):
-            let msg = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            return "agentsync 执行失败（退出码 \(code)）\(msg.isEmpty ? "" : "：\(msg)")"
-        case .decodeFailed(let detail):
-            return "agentsync 输出解析失败：\(detail)"
+        // 子进程原始输出可能意外包含配置片段，不能回显到 UI。
+        // 结构化 {ok:false,error} 的业务提示仍由 cliError 单独展示。
+        case .nonZeroExit(let code):
+            return "agentsync 执行失败（退出码 \(code)）。请检查安装状态后重试。"
+        case .decodeFailed:
+            return "agentsync 返回了无法识别的数据。请更新 agentsync 后重试。"
         case .cliError(let msg):
             return msg
         }
@@ -29,7 +30,7 @@ enum AgentSyncError: LocalizedError {
 
 // MARK: - JSON 数据模型（对应 CLI --json 输出）
 
-struct ConfigProfile: Decodable, Identifiable {
+struct ConfigProfile: Decodable, Identifiable, Equatable {
     let key: String
     let label: String
     let variant: String
@@ -41,6 +42,8 @@ struct ConfigProfile: Decodable, Identifiable {
     let commands: String?
     let agents: String?
     let hooks: String?
+    // 新版 agentsync 的目标写入能力；nil 代表旧 CLI，需回退到旧有内容判断。
+    let declaredWritableLayers: [String]?
 
     var id: String { key }
 
@@ -49,6 +52,7 @@ struct ConfigProfile: Decodable, Identifiable {
         case mcpState = "mcp_state"
         case mcpCount = "mcp_count"
         case hasRules = "has_rules"
+        case declaredWritableLayers = "writable_layers"
     }
 
     var mcpDisplay: String {
@@ -75,8 +79,30 @@ struct ConfigProfile: Decodable, Identifiable {
         Self.hasLayerValue(hooks)
     }
 
+    /// 按 agentsync CLI 的层名返回此 profile 实际可作为真源的内容。
+    /// 顺序需要稳定，直接用于 UI 与 `--layer` 参数。
+    var syncableLayers: [String] {
+        var layers: [String] = []
+        if mcpState == "present" { layers.append("mcp") }
+        if hasRules { layers.append("rules") }
+        if hasSkills { layers.append("skills") }
+        if hasCommands { layers.append("commands") }
+        if hasAgents { layers.append("agents") }
+        if hasHooks { layers.append("hooks") }
+        return layers
+    }
+
     var hasSyncableLayer: Bool {
-        mcpState == "present" || hasRules || hasSkills || hasCommands || hasAgents || hasHooks
+        !syncableLayers.isEmpty
+    }
+
+    /// 目标能接收默认 push 的层。旧版 CLI 未提供字段时，保持原有兼容行为。
+    var writableLayers: [String] {
+        declaredWritableLayers ?? syncableLayers
+    }
+
+    var hasWritableLayer: Bool {
+        !writableLayers.isEmpty
     }
 
     private static func hasLayerValue(_ value: String?) -> Bool {
@@ -94,9 +120,43 @@ enum ConfigSelection {
         profiles.filter(\.hasSyncableLayer)
     }
 
-    static func validTargets(_ selected: Set<String>, profiles: [ConfigProfile], source: String) -> Set<String> {
-        let allowed = Set(syncableProfiles(profiles).filter { $0.key != source }.map(\.key))
+    /// 工具可作为真源，取决于它现在实际拥有的内容；这和目标是否可写是两套口径。
+    static func targetProfiles(_ profiles: [ConfigProfile]) -> [ConfigProfile] {
+        profiles.filter { $0.hasSyncableLayer || $0.hasWritableLayer }
+    }
+
+    /// 目标必须覆盖本次选中的每一层。这样预览前就排除无效组合，仍保留可 --create 的空路径。
+    static func targetableProfiles(
+        _ profiles: [ConfigProfile],
+        source: String,
+        layers: [String]
+    ) -> [ConfigProfile] {
+        let selectedLayers = Set(layers)
+        return targetProfiles(profiles).filter { profile in
+            profile.key != source
+                && profile.hasWritableLayer
+                && selectedLayers.isSubset(of: Set(profile.writableLayers))
+        }
+    }
+
+    static func validTargets(
+        _ selected: Set<String>,
+        profiles: [ConfigProfile],
+        source: String,
+        layers: [String]
+    ) -> Set<String> {
+        let allowed = Set(targetableProfiles(profiles, source: source, layers: layers).map(\.key))
         return selected.intersection(allowed)
+    }
+
+    static func availableLayers(for source: String, profiles: [ConfigProfile]) -> [String] {
+        profiles.first { $0.key == source }?.syncableLayers ?? []
+    }
+
+    /// 刷新扫描结果后，已从真源消失的层绝不能继续传给 pull / push。
+    static func validLayers(_ selected: [String], for source: String, profiles: [ConfigProfile]) -> [String] {
+        let available = Set(availableLayers(for: source, profiles: profiles))
+        return selected.filter { available.contains($0) }
     }
 }
 
@@ -113,8 +173,10 @@ struct PushTarget: Decodable, Identifiable {
     let key: String
     let label: String
     let layer: String
-    let path: String
-    let exists: Bool
+    // agentsync 对不支持或只读的层会返回 skip 条目；这些条目没有 path / exists。
+    // 这两个字段必须可选，否则一次 skip 会让整个预览 JSON 解码失败。
+    let path: String?
+    let exists: Bool?
     let servers: ServersDiff?
     let itemsAdded: [String]?
     let alreadyPresent: [String]?
@@ -122,6 +184,7 @@ struct PushTarget: Decodable, Identifiable {
     let change: String            // none / modify / create / skip_no_create / add / skip
     let written: Bool
     let diffText: String?
+    let skipReason: String?
 
     var id: String { "\(key)-\(layer)" }
 
@@ -131,6 +194,7 @@ struct PushTarget: Decodable, Identifiable {
         case alreadyPresent = "already_present"
         case dstOnly = "dst_only"
         case diffText = "diff_text"
+        case skipReason = "skip_reason"
     }
 }
 
@@ -146,6 +210,50 @@ struct PushResult: Decodable {
         case ok, apply, targets, error
         case anyChange = "any_change"
         case backupTs = "backup_ts"
+    }
+}
+
+/// 把 agentsync 返回的层级结果与用户本次请求逐项对照，避免把「没有预览结果」误称为一致。
+struct ConfigSyncTargetLayer: Hashable, Identifiable {
+    let target: String
+    let layer: String
+
+    var id: String { "\(target)-\(layer)" }
+}
+
+enum ConfigPreview {
+    /// agentsync 对一个工具不支持的单文件层不会生成条目；保留缺口供 UI 明示「未同步」。
+    static func missingTargetLayers(
+        targets: [String],
+        layers: [String],
+        result: PushResult
+    ) -> [ConfigSyncTargetLayer] {
+        let returned = Set(result.targets.map {
+            ConfigSyncTargetLayer(target: $0.key, layer: $0.layer)
+        })
+        var seen = Set<ConfigSyncTargetLayer>()
+
+        return targets.flatMap { target in
+            layers.map { ConfigSyncTargetLayer(target: target, layer: $0) }
+        }.filter { request in
+            seen.insert(request).inserted && !returned.contains(request)
+        }
+    }
+
+    /// 只有这些变更会在带 --apply 的第二步产生写入；skip 只是提示，不能启用确认写入。
+    static func writableTargetKeys(in result: PushResult) -> Set<String> {
+        Set(result.targets.compactMap { target in
+            switch target.change {
+            case "create", "modify", "add": return target.key
+            default: return nil
+            }
+        })
+    }
+
+    /// 预览必须覆盖用户请求的每一对目标/层，才允许进入真正的写入步骤，避免静默部分同步。
+    static func canApply(targets: [String], layers: [String], result: PushResult) -> Bool {
+        missingTargetLayers(targets: targets, layers: layers, result: result).isEmpty
+            && !writableTargetKeys(in: result).isEmpty
     }
 }
 
@@ -237,10 +345,9 @@ enum AgentSyncService {
         proc.standardError = errPipe
 
         try proc.run()
-        // 先读干净再 wait，避免大输出撑爆 pipe 缓冲导致死锁
-        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-        proc.waitUntilExit()
+        let output = ProcessPipeReader.read(stdout: outPipe, stderr: errPipe, process: proc)
+        let outData = output.stdout
+        let errData = output.stderr
 
         guard proc.terminationStatus == 0 else {
             // CLI 的业务错误（如 canonical 为空）以 {ok:false,error} + 退出码 1 返回，
@@ -248,8 +355,9 @@ enum AgentSyncService {
             if let msg = decodeCLIError(outData) {
                 throw AgentSyncError.cliError(msg)
             }
-            let stderr = String(decoding: errData, as: UTF8.self)
-            throw AgentSyncError.nonZeroExit(code: proc.terminationStatus, stderr: stderr)
+            // stderr 仍须读完，避免子进程因 pipe 缓冲区阻塞；但绝不显示其原文。
+            _ = errData
+            throw AgentSyncError.nonZeroExit(code: proc.terminationStatus)
         }
         return outData
     }
@@ -272,8 +380,8 @@ enum AgentSyncService {
             do {
                 return try JSONDecoder().decode(T.self, from: data)
             } catch {
-                let raw = String(decoding: data, as: UTF8.self).prefix(200)
-                throw AgentSyncError.decodeFailed("\(error.localizedDescription)（原始：\(raw)）")
+                // JSON 可能来自未来版本或异常 CLI，不能将原始输出带入用户可见错误。
+                throw AgentSyncError.decodeFailed
             }
         }.value
     }

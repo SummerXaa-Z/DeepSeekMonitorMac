@@ -160,7 +160,7 @@ enum CodexUsage {
         let size: UInt64
         let mtime: Date
         let perDay: [String: Tally]
-        let perModel: [String: Int]          // 模型 → totalTokens
+        let perDayModel: [String: [String: Int]] // day → 模型 → totalTokens
         let perDayHour: [String: [Int: Int]] // day → hour → totalTokens
         let project: String?                 // session cwd 末段（每文件一个）
         let rateLimitsByChannel: [String: CodexRateLimits]  // 通道 → 该文件内最新快照
@@ -175,9 +175,8 @@ enum CodexUsage {
     // 全树扫描，按 mtime 过滤：长期复用的 session（Codex Desktop 可挂数周）
     // 落在很老的日期目录里，但只要还在写 mtime 就是新的，按目录日期扫会漏掉。
     // mtime 早于 7 天窗起点的文件不可能含窗内事件，直接跳过。
-    static func load() -> CodexUsageResult {
+    static func load(sessionsDirectory: URL = sessionsDir, now: Date = Date()) -> CodexUsageResult {
         let fm = FileManager.default
-        let now = Date()
         var dayMap: [String: CodexDayUsage] = [:]
         let window: Set<String> = Set((0..<7).map { DateUtil.key(DateUtil.addDays(now, -$0)) })
         for key in window { dayMap[key] = CodexDayUsage(date: key) }
@@ -190,7 +189,7 @@ enum CodexUsage {
         let todayKey = DateUtil.key(now)
 
         let keys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey]
-        guard let walker = fm.enumerator(at: sessionsDir, includingPropertiesForKeys: keys) else {
+        guard let walker = fm.enumerator(at: sessionsDirectory, includingPropertiesForKeys: keys) else {
             return CodexUsageResult(rateLimits: nil, allRateLimits: [],
                                     days: dayMap.values.sorted { $0.date < $1.date },
                                     models: [], projects: [], todayHours: [])
@@ -221,10 +220,12 @@ enum CodexUsage {
                 limitsByChannel[channel] = rl
             }
             guard counted else { continue }
-            for (model, tokens) in summary.perModel {
-                var m = modelMap[model] ?? CodexModelUsage(model: model)
-                m.totalTokens += tokens
-                modelMap[model] = m
+            for (date, models) in summary.perDayModel where window.contains(date) {
+                for (model, tokens) in models {
+                    var m = modelMap[model] ?? CodexModelUsage(model: model)
+                    m.totalTokens += tokens
+                    modelMap[model] = m
+                }
             }
             let proj = summary.project ?? "(其他)"
             var pj = projectMap[proj] ?? CodexProjectUsage(project: proj)
@@ -269,7 +270,7 @@ enum CodexUsage {
     }
 
     private static func scan(_ file: URL, size: UInt64, mtime: Date) -> FileSummary {
-        let empty = FileSummary(size: size, mtime: mtime, perDay: [:], perModel: [:],
+        let empty = FileSummary(size: size, mtime: mtime, perDay: [:], perDayModel: [:],
                                 perDayHour: [:], project: nil, rateLimitsByChannel: [:])
         guard let handle = try? FileHandle(forReadingFrom: file) else { return empty }
         defer { try? handle.close() }
@@ -282,7 +283,7 @@ enum CodexUsage {
         let decoder = JSONDecoder()
 
         var perDay: [String: Tally] = [:]
-        var perModel: [String: Int] = [:]
+        var perDayModel: [String: [String: Int]] = [:]
         var perDayHour: [String: [Int: Int]] = [:]
         var project: String?
         var currentModel = "unknown"     // turn_context 声明后续 turn 的模型
@@ -290,9 +291,24 @@ enum CodexUsage {
         var prevTotal: Event.TokenUsage?
         var carry = Data()   // chunk 边界上的半行
 
-        while let chunk = try? handle.read(upToCount: chunkSize), !chunk.isEmpty {
+        var reachedEnd = false
+        while !reachedEnd {
+            let chunk = (try? handle.read(upToCount: chunkSize)) ?? Data()
             var data: Data
-            if carry.isEmpty { data = chunk } else { data = carry + chunk; carry = Data() }
+            if chunk.isEmpty {
+                // JSONL 写入过程里最后一行不一定立刻带换行；EOF 时把完整残留行当作一行消费。
+                // 若它确实仍是不完整 JSON，下面的 decode 自然失败并安全跳过。
+                guard !carry.isEmpty else { break }
+                data = carry
+                data.append(newline)
+                carry = Data()
+                reachedEnd = true
+            } else if carry.isEmpty {
+                data = chunk
+            } else {
+                data = carry + chunk
+                carry = Data()
+            }
 
             var lineStart = data.startIndex
             while lineStart < data.endIndex {
@@ -332,7 +348,9 @@ enum CodexUsage {
                     t.output += d.output; t.reasoning += d.reasoning; t.total += d.total
                     perDay[day] = t
                     prevTotal = cur
-                    perModel[currentModel, default: 0] += d.total
+                    var models = perDayModel[day] ?? [:]
+                    models[currentModel, default: 0] += d.total
+                    perDayModel[day] = models
                     let hour = Calendar.current.component(.hour, from: ts)
                     perDayHour[day, default: [:]][hour, default: 0] += d.total
                 }
@@ -353,7 +371,7 @@ enum CodexUsage {
                 }
             }
         }
-        return FileSummary(size: size, mtime: mtime, perDay: perDay, perModel: perModel,
+        return FileSummary(size: size, mtime: mtime, perDay: perDay, perDayModel: perDayModel,
                            perDayHour: perDayHour, project: project,
                            rateLimitsByChannel: rlByChannel)
     }

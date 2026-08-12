@@ -59,7 +59,7 @@ sign_app() {
     if has_identity "$SELF_SIGN_IDENTITY"; then
         codesign --force --deep --sign "$SELF_SIGN_IDENTITY" --timestamp=none "$app"
     else
-        echo "WARN: 未找到证书 $SELF_SIGN_IDENTITY，回退 ad-hoc 签名" >&2
+        echo "WARN: 未找到证书 ${SELF_SIGN_IDENTITY}，回退 ad-hoc 签名" >&2
         codesign --force --deep --sign - "$app"
     fi
 }

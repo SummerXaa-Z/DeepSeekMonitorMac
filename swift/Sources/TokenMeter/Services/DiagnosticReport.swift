@@ -203,10 +203,8 @@ enum DiagnosticReport {
         proc.standardError = err
         do {
             try proc.run()
-            let outData = out.fileHandleForReading.readDataToEndOfFile()
-            let errData = err.fileHandleForReading.readDataToEndOfFile()
-            proc.waitUntilExit()
-            let output = String(decoding: outData + errData, as: UTF8.self)
+            let captured = ProcessPipeReader.read(stdout: out, stderr: err, process: proc)
+            let output = String(decoding: captured.stdout + captured.stderr, as: UTF8.self)
             return (proc.terminationStatus, output)
         } catch {
             return (-1, error.localizedDescription)

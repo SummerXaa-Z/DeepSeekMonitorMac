@@ -1,8 +1,19 @@
 # Changelog
 
-## Unreleased
+## v3.7.3 — 2026-08-12 — 用量统计与配置同步稳定性
 
 - **配置同步层选择**：同步层卡片新增“全选 / 全不选”快捷按钮，可一次切换 MCP、指令、Skills、Commands、Agents 与 Hooks。影响范围：`ConfigSyncView.swift`。
+- **配置同步真源联动**：选择真源时，自动预选其实际存在的同步层，并禁用不适用层，避免对 Rules / Skills-only 真源误发空 MCP 操作；新增 XCTest 覆盖层映射。影响范围：`ConfigSyncView.swift`、`AgentSyncService.swift`、`ConfigSelectionTests.swift`。
+- **配置同步隐私加固**：子进程异常或 JSON 解析失败时不再向界面回显原始 stdout / stderr，防止异常 CLI 输出意外暴露配置片段；保留退出码与可行动的更新提示。影响范围：`AgentSyncService.swift`、`AgentSyncContractTests.swift`。
+- **配置同步预览防误报**：对 agentsync 未返回的目标/同步层明确标为“未同步”，不再误显示为“已一致”；缺少任一目标层时禁止确认写入，避免部分同步；兼容只读 skip 条目缺少路径字段的 JSON，并只为实际可写变更启用确认写入。影响范围：`AgentSyncService.swift`、`ConfigSyncWindow.swift`、`AgentSyncContractTests.swift`。
+- **配置同步陈旧层拦截**：扫描刷新后，会清除真源已消失的层；派发 pull / 预览前再次求交集，避免把旧 canonical 的规则或技能误推回目标。影响范围：`ConfigSyncView.swift`、`AgentSyncService.swift`、`ConfigSelectionTests.swift`。
+- **配置同步目标能力预判**：接收 agentsync 的 `writable_layers`，在预览前只保留完整支持当前同步层的目标；配置文件缺失但可由 `--create` 新建的 MCP / Rules 目标仍可选择，旧版 agentsync 自动回退原有判断。影响范围：`AgentSyncService.swift`、`ConfigSyncView.swift`、`ConfigSelectionTests.swift`。
+- **子进程输出防卡死**：AgentSync CLI 与诊断签名检查统一并发排空 stdout / stderr，避免命令先写满一路输出时与主进程互相等待；新增 1 MiB stderr 回归测试。影响范围：`ProcessPipeReader.swift`、`AgentSyncService.swift`、`DiagnosticReport.swift`、`AgentSyncContractTests.swift`。
+- **菜单栏可访问性**：为状态栏按钮补充稳定的辅助功能名称、帮助文本和标识符，改善 VoiceOver 体验，也让菜单栏冒烟测试可以可靠定位 TokenMeter。影响范围：`AppDelegate.swift`。
+- **自签名打包修复**：修复自签名证书缺失时 Bash 将中文标点误识别为变量名一部分、导致发布脚本在 ad-hoc fallback 前退出的问题。影响范围：`package.sh`。
+- **发布版本单一来源**：Info.plist 改为读取 `MARKETING_VERSION`，避免项目版本升级后打包脚本仍生成旧版本 DMG。影响范围：`project.yml`、`Info.plist`。
+- **长期会话窗口校准**：Claude 与 Codex 的模型/项目排行改按事件日期聚合；活跃的长会话不再把 7 天窗口外的历史 Token 混入“近 7 天”排行。影响范围：`ClaudeUsage.swift`、`CodexUsage.swift`。
+- **JSONL 尾行完整性**：Claude 与 Codex 的流式扫描器现在会消费文件末尾完整但尚未换行的事件，避免最新一条用量被漏记并被缓存放大。影响范围：`ClaudeUsage.swift`、`CodexUsage.swift`、`UsageWindowTests.swift`。
 
 ## v3.7.2 — 2026-07-10 — 配置同步显示、发布链路与开源维护
 

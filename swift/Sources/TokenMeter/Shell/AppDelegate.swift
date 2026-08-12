@@ -24,8 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 状态栏图标
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
-            button.image = Self.statusImage()
-            button.image?.isTemplate = true   // 跟随明暗菜单栏自动反色
+            Self.configureStatusButton(button)
             button.action = #selector(togglePopover(_:))
             button.target = self
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -222,6 +221,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return img
         }
         return NSImage(systemSymbolName: "chart.bar.fill", accessibilityDescription: "TokenMeter")
+    }
+
+    static func configureStatusButton(_ button: NSStatusBarButton) {
+        button.image = statusImage()
+        button.image?.isTemplate = true   // 跟随明暗菜单栏自动反色
+        button.toolTip = "TokenMeter"
+        button.setAccessibilityLabel("TokenMeter")
+        button.setAccessibilityHelp("打开 TokenMeter 用量面板")
+        button.setAccessibilityIdentifier("TokenMeter.StatusItem")
     }
 
     @objc private func togglePopover(_ sender: NSStatusBarButton) {

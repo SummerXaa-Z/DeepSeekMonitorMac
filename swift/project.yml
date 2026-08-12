@@ -7,7 +7,7 @@ options:
 
 settings:
   base:
-    MARKETING_VERSION: "3.7.2"
+    MARKETING_VERSION: "3.7.3"
     CURRENT_PROJECT_VERSION: "1"
     SWIFT_VERSION: "5.0"
     # bundle ID 保持 com.deepseek.monitor.mac 不变：UserDefaults 偏好、
@@ -34,7 +34,7 @@ targets:
       properties:
         CFBundleDisplayName: TokenMeter
         CFBundleName: TokenMeter
-        CFBundleShortVersionString: "3.7.2"
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
         # 菜单栏应用：不进 Dock、不抢主菜单栏
         LSUIElement: true
         LSMinimumSystemVersion: "14.0"

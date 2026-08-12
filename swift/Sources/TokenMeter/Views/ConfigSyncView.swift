@@ -22,9 +22,13 @@ struct ConfigSyncView: View {
         state.configSync.result?.profiles ?? []
     }
 
-    // 可作为真源/目标的工具：有任何可同步的层
-    private var syncable: [ConfigProfile] {
+    // 真源必须有当前可抽取的内容；目标则按 writable_layers 单独判断。
+    private var sourceProfiles: [ConfigProfile] {
         ConfigSelection.syncableProfiles(profiles)
+    }
+
+    private var displayProfiles: [ConfigProfile] {
+        ConfigSelection.targetProfiles(profiles)
     }
 
     private var layers: [String] {
@@ -38,13 +42,23 @@ struct ConfigSyncView: View {
         return l
     }
 
+    // Toggle 状态可能比异步 scan 结果旧；所有操作统一使用和当前真源取交集后的层。
+    private var activeLayers: [String] {
+        ConfigSelection.validLayers(layers, for: source, profiles: profiles)
+    }
+
     // 可选为目标的工具（排除真源自己）
     private var targetableProfiles: [ConfigProfile] {
-        syncable.filter { $0.key != source }
+        ConfigSelection.targetableProfiles(profiles, source: source, layers: activeLayers)
     }
 
     private var validSelectedTargets: Set<String> {
-        ConfigSelection.validTargets(selectedTargets, profiles: profiles, source: source)
+        ConfigSelection.validTargets(
+            selectedTargets,
+            profiles: profiles,
+            source: source,
+            layers: activeLayers
+        )
     }
 
     // 是否全选了
@@ -53,7 +67,11 @@ struct ConfigSyncView: View {
     }
 
     private var allLayersSelected: Bool {
-        layerMCP && layerRules && layerSkills && layerCommands && layerAgents && layerHooks
+        !availableSourceLayers.isEmpty && Set(activeLayers) == Set(availableSourceLayers)
+    }
+
+    private var availableSourceLayers: [String] {
+        ConfigSelection.availableLayers(for: source, profiles: profiles)
     }
 
     // 切换全选
@@ -66,19 +84,24 @@ struct ConfigSyncView: View {
     }
 
     private func setAllLayers(_ selected: Bool) {
-        layerMCP = selected
-        layerRules = selected
-        layerSkills = selected
-        layerCommands = selected
-        layerAgents = selected
-        layerHooks = selected
+        setLayers(selected ? availableSourceLayers : [])
+    }
+
+    private func setLayers(_ selected: [String]) {
+        let selected = Set(selected)
+        layerMCP = selected.contains("mcp")
+        layerRules = selected.contains("rules")
+        layerSkills = selected.contains("skills")
+        layerCommands = selected.contains("commands")
+        layerAgents = selected.contains("agents")
+        layerHooks = selected.contains("hooks")
     }
 
     var body: some View {
         ScrollView {
             VStack(spacing: 10) {
                 header
-                if !syncable.isEmpty {
+                if !sourceProfiles.isEmpty {
                     sourceCard
                     toolsCard
                     layerCard
@@ -108,6 +131,42 @@ struct ConfigSyncView: View {
         }
         .scrollIndicators(.hidden)
         .task { await state.loadConfigSync() }
+        .onChange(of: source) { _, newSource in
+            // 真源切换时只预选它实际拥有的层，避免默认 MCP 对 Rules/Skills-only 真源产生空操作。
+            let available = ConfigSelection.availableLayers(for: newSource, profiles: profiles)
+            setLayers(available)
+            selectedTargets = ConfigSelection.validTargets(
+                selectedTargets,
+                profiles: profiles,
+                source: newSource,
+                layers: available
+            )
+        }
+        .onChange(of: profiles) { _, _ in
+            // scan 刷新时，源或目标能力都可能变化：清掉失效层与已不兼容的旧勾选。
+            guard source.isEmpty || sourceProfiles.contains(where: { $0.key == source }) else {
+                source = ""
+                selectedTargets.removeAll()
+                return
+            }
+            let validLayers = ConfigSelection.validLayers(layers, for: source, profiles: profiles)
+            setLayers(validLayers)
+            selectedTargets = ConfigSelection.validTargets(
+                selectedTargets,
+                profiles: profiles,
+                source: source,
+                layers: validLayers
+            )
+        }
+        .onChange(of: activeLayers) { _, newLayers in
+            // 手动增减同步层后，保留不了全部层的目标不应继续处于选中状态。
+            selectedTargets = ConfigSelection.validTargets(
+                selectedTargets,
+                profiles: profiles,
+                source: source,
+                layers: newLayers
+            )
+        }
     }
 
     private var header: some View {
@@ -142,7 +201,7 @@ struct ConfigSyncView: View {
                     .font(.system(size: 12, weight: .semibold))
                 Picker("", selection: $source) {
                     Text("请选择").tag("")
-                    ForEach(syncable) { p in
+                    ForEach(sourceProfiles) { p in
                         Text(p.label).tag(p.key)
                     }
                 }
@@ -165,9 +224,9 @@ struct ConfigSyncView: View {
                     }
                     .font(.system(size: 11))
                 }
-                ForEach(syncable) { p in
+                ForEach(displayProfiles) { p in
                     toolRow(p)
-                    if p.id != syncable.last?.id { Divider().opacity(0.3) }
+                    if p.id != displayProfiles.last?.id { Divider().opacity(0.3) }
                 }
             }
         }
@@ -175,7 +234,7 @@ struct ConfigSyncView: View {
 
     private func toolRow(_ p: ConfigProfile) -> some View {
         let isSource = p.key == source
-        let selectable = p.hasSyncableLayer && !isSource
+        let selectable = targetableProfiles.contains { $0.key == p.key }
         return HStack(spacing: 8) {
             Image(systemName: iconFor(p.key))
                 .font(.system(size: 13))
@@ -183,7 +242,12 @@ struct ConfigSyncView: View {
                 .frame(width: 18)
             VStack(alignment: .leading, spacing: 1) {
                 Text(p.label).font(.system(size: 12, weight: .medium))
-                layerStatusText(p)
+                if !isSource && !selectable && !activeLayers.isEmpty {
+                    Text("不支持所选同步层")
+                        .font(.system(size: 10)).foregroundStyle(.orange)
+                } else {
+                    layerStatusText(p)
+                }
             }
             Spacer()
             if isSource {
@@ -191,7 +255,7 @@ struct ConfigSyncView: View {
                     .foregroundStyle(Theme.brand)
             } else {
                 Toggle("", isOn: Binding(
-                    get: { selectedTargets.contains(p.key) },
+                    get: { validSelectedTargets.contains(p.key) },
                     set: { on in
                         if on { selectedTargets.insert(p.key) }
                         else { selectedTargets.remove(p.key) }
@@ -240,24 +304,31 @@ struct ConfigSyncView: View {
                     Label("同步层", systemImage: "square.stack.3d.up")
                         .font(.system(size: 12, weight: .semibold))
                     Spacer()
-                    Button(allLayersSelected ? "全不选" : "全选") {
+                    Button(allLayersSelected ? "全不选" : "全选可用") {
                         setAllLayers(!allLayersSelected)
                     }
                     .font(.system(size: 11))
+                    .disabled(availableSourceLayers.isEmpty)
                 }
                 HStack(spacing: 16) {
-                    Toggle("MCP", isOn: $layerMCP).font(.system(size: 11))
-                    Toggle("指令", isOn: $layerRules).font(.system(size: 11))
-                    Toggle("Skills", isOn: $layerSkills).font(.system(size: 11))
+                    layerToggle("MCP", isOn: $layerMCP, layer: "mcp")
+                    layerToggle("指令", isOn: $layerRules, layer: "rules")
+                    layerToggle("Skills", isOn: $layerSkills, layer: "skills")
                 }
                 HStack(spacing: 16) {
-                    Toggle("Commands", isOn: $layerCommands).font(.system(size: 11))
-                    Toggle("Agents", isOn: $layerAgents).font(.system(size: 11))
-                    Toggle("Hooks", isOn: $layerHooks).font(.system(size: 11))
+                    layerToggle("Commands", isOn: $layerCommands, layer: "commands")
+                    layerToggle("Agents", isOn: $layerAgents, layer: "agents")
+                    layerToggle("Hooks", isOn: $layerHooks, layer: "hooks")
                 }
             }
             .toggleStyle(.checkbox)
         }
+    }
+
+    private func layerToggle(_ title: String, isOn: Binding<Bool>, layer: String) -> some View {
+        Toggle(title, isOn: isOn)
+            .font(.system(size: 11))
+            .disabled(!availableSourceLayers.contains(layer))
     }
 
     // MARK: - 操作
@@ -269,7 +340,7 @@ struct ConfigSyncView: View {
                 Label("拉取真源", systemImage: "tray.and.arrow.down")
                     .font(.system(size: 12))
             }
-            .disabled(source.isEmpty || layers.isEmpty || busy)
+            .disabled(source.isEmpty || activeLayers.isEmpty || busy)
 
             Spacer()
 
@@ -280,15 +351,16 @@ struct ConfigSyncView: View {
                     .font(.system(size: 12, weight: .semibold))
             }
             .buttonStyle(.borderedProminent)
-            .disabled(validSelectedTargets.isEmpty || layers.isEmpty || busy)
+            .disabled(validSelectedTargets.isEmpty || activeLayers.isEmpty || busy)
         }
     }
 
     private func doPull() async {
-        guard !source.isEmpty else { return }
+        let selectedLayers = activeLayers
+        guard !source.isEmpty, !selectedLayers.isEmpty else { return }
         busy = true; actionError = nil
         do {
-            _ = try await state.configSyncPull(from: source, layers: layers)
+            _ = try await state.configSyncPull(from: source, layers: selectedLayers)
         } catch {
             actionError = (error as? AgentSyncError)?.errorDescription ?? error.localizedDescription
         }
@@ -296,10 +368,12 @@ struct ConfigSyncView: View {
     }
 
     private func openPreview() {
+        let selectedLayers = activeLayers
+        guard !selectedLayers.isEmpty else { return }
         actionError = nil
         ConfigSyncWindow.shared.present(
             targets: Array(validSelectedTargets).sorted(),
-            layers: layers,
+            layers: selectedLayers,
             state: state
         )
     }

@@ -37,7 +37,8 @@ final class ConfigProfileTests: XCTestCase {
             skills: "—",
             commands: commands,
             agents: agents,
-            hooks: hooks
+            hooks: hooks,
+            declaredWritableLayers: nil
         )
     }
 }
